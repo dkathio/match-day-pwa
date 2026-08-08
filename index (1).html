@@ -292,6 +292,13 @@
   .sheet-actions .btn{ flex:1; }
   .confirm-msg{ font-size:14px; line-height:1.6; color:var(--floodlight); text-align:center; margin-bottom:18px; }
 
+  .pick-row{
+    display:flex; align-items:center; gap:10px;
+    padding:11px 4px; border-bottom:1px solid var(--card-border); font-size:14px; font-weight:500;
+  }
+  .pick-row:last-child{ border-bottom:none; }
+  .pick-row input[type="checkbox"]{ width:18px; height:18px; accent-color:var(--turf-light); flex-shrink:0; }
+
   .toolbar-row{ display:flex; gap:8px; margin-top:14px; }
   .toolbar-row .btn{ flex:1; }
   a.hidden-file{ display:none; }
@@ -315,7 +322,8 @@ function defaultState(){
     legFormat: 'one',
     fixtures: [],
     phase: 'setup', // setup -> league -> knockout -> complete
-    knockout: null
+    knockout: null,
+    leagueChampion: null // set when a season ends at league phase, skipping knockout
   };
 }
 
@@ -449,14 +457,76 @@ function recomputeKnockoutFlow(){
 
 function resetKnockout(){
   state.knockout = null;
-  state.phase = 'league';
-  state.activeTab = 'fixtures';
+  // If the league was skipped entirely, there's no league phase to fall back to.
+  const backToLeague = state.fixtures.length > 0;
+  state.phase = backToLeague ? 'league' : 'setup';
+  state.activeTab = backToLeague ? 'fixtures' : 'players';
   persist(); modalState = null; render();
 }
 
 function resetSeason(){
   state = defaultState();
   persist(); modalState = null; render();
+}
+
+/* ---------------- SKIP LEAGUE -> STRAIGHT TO KNOCKOUT ---------------- */
+function openPickKnockoutModal(){
+  if(state.phase !== 'setup' || state.players.length < 4) return;
+  modalState = {
+    kind: 'pickKnockout',
+    selected: state.players.length === 4 ? state.players.map(p=>p.id) : []
+  };
+  render();
+}
+function toggleKnockoutPick(id){
+  if(!modalState || modalState.kind !== 'pickKnockout') return;
+  const sel = modalState.selected;
+  const idx = sel.indexOf(id);
+  if(idx >= 0) sel.splice(idx,1);
+  else if(sel.length < 4) sel.push(id);
+  render();
+}
+function confirmPickKnockout(){
+  if(!modalState || modalState.selected.length !== 4) return;
+  startKnockoutOnly(modalState.selected);
+}
+function startKnockoutOnly(ids){
+  const shuffled = shuffle(ids);
+  state.fixtures = [];
+  state.knockout = {
+    semis: [
+      {id:'semi1', homeId:shuffled[0], awayId:shuffled[1], homeScore:null, awayScore:null, played:false, penalty:null, winnerId:null},
+      {id:'semi2', homeId:shuffled[2], awayId:shuffled[3], homeScore:null, awayScore:null, played:false, penalty:null, winnerId:null}
+    ],
+    final: {id:'final', homeId:null, awayId:null, homeScore:null, awayScore:null, played:false, penalty:null, winnerId:null},
+    champion: null
+  };
+  state.phase = 'knockout';
+  state.activeTab = 'knockout';
+  modalState = null;
+  persist(); render();
+}
+
+/* ---------------- END SEASON AT LEAGUE (SKIP KNOCKOUT) ---------------- */
+function endSeasonAtLeague(){
+  if(state.phase !== 'league') return;
+  const table = computeTable();
+  if(!table.length) return;
+  const msg = leagueComplete()
+    ? 'End the season now with the league table only? No knockout stage will be played — the top of the table becomes champion.'
+    : 'Not every league fixture has been played yet. End the season now anyway? The current table leader becomes champion and no knockout will be played.';
+  askConfirm(msg, ()=>{
+    state.leagueChampion = table[0].playerId;
+    state.phase = 'complete';
+    state.activeTab = 'table';
+    persist();
+  });
+}
+function undoLeagueEnd(){
+  if(!state.leagueChampion) return;
+  state.leagueChampion = null;
+  state.phase = 'league';
+  persist(); render();
 }
 
 /* ---------------- MODAL / RESULT ENTRY ---------------- */
@@ -726,6 +796,9 @@ function renderPlayersTab(){
     </button>`;
     if(state.players.length < 4){
       html += `<p class="hint" style="text-align:center;">Add at least 4 friends to start (needed for the top-4 knockout).</p>`;
+    } else {
+      html += `<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="openPickKnockoutModal()">Skip League &mdash; Go Straight to Knockout</button>
+      <p class="hint" style="text-align:center;">Pick any 4 players and jump right into the semi-finals, no league table.</p>`;
     }
   } else {
     html += `<div class="eyebrow">Season</div>
@@ -753,6 +826,11 @@ function renderFixturesTab(){
 
   if(state.phase === 'setup'){
     html += emptyState(ICONS.emptyCal, 'No fixtures yet — add friends and start the league from the Players tab.');
+    return html;
+  }
+
+  if(state.fixtures.length === 0){
+    html += emptyState(ICONS.emptyCal, 'This season skipped straight to the knockout — head over to the Knockout tab.');
     return html;
   }
 
@@ -796,7 +874,21 @@ function renderTableTab(){
     return html;
   }
 
+  if(state.fixtures.length === 0 && state.phase !== 'setup'){
+    html += emptyState(ICONS.chart, 'This season skipped the league phase — head over to the Knockout tab.');
+    return html;
+  }
+
   const table = computeTable();
+
+  if(state.leagueChampion){
+    html += `<div class="champion-card">
+      <div class="trophy">${ICONS.trophyBig}</div>
+      <div class="name">${escapeHtml(getPlayerName(state.leagueChampion))}</div>
+      <div class="label">League Champion</div>
+    </div>
+    <button class="btn btn-secondary btn-block" style="margin-bottom:14px;" onclick="askConfirm('Undo this and resume the league phase? You can still draw the knockout later once fixtures are complete.', undoLeagueEnd)">Undo &mdash; Resume League</button>`;
+  }
   const played = state.fixtures.filter(f=>f.played).length;
   const total = state.fixtures.length;
   const pct = total ? Math.round((played/total)*100) : 0;
@@ -825,9 +917,11 @@ function renderTableTab(){
 
   if(state.phase === 'league'){
     if(leagueComplete()){
-      html += `<button class="btn btn-amber btn-block" onclick="drawSemis()">Draw Semi-Finals &rarr;</button>`;
+      html += `<button class="btn btn-amber btn-block" onclick="drawSemis()">Draw Semi-Finals &rarr;</button>
+      <button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="endSeasonAtLeague()">End Season Here &mdash; Skip Knockout</button>`;
     } else {
-      html += `<p class="hint" style="text-align:center;">The top 4 will go through to the knockout once every league fixture has a result.</p>`;
+      html += `<p class="hint" style="text-align:center;">The top 4 will go through to the knockout once every league fixture has a result.</p>
+      <button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="endSeasonAtLeague()">End Season Early (League Table Only)</button>`;
     }
   }
 
@@ -839,7 +933,11 @@ function renderKnockoutTab(){
   let html = `<h2 class="section-title">${ICONS.trophy} Knockout</h2>`;
 
   if(!state.knockout){
-    html += emptyState(ICONS.trophyBig, 'The semi-finals will be drawn here once the league phase is finished — top 4 only.');
+    if(state.leagueChampion){
+      html += emptyState(ICONS.trophyBig, 'This season ended at the league phase — no knockout was played. Check the Table tab for the champion.');
+    } else {
+      html += emptyState(ICONS.trophyBig, 'The semi-finals will be drawn here once the league phase is finished — top 4 only, or skip straight here from the Players tab.');
+    }
     return html;
   }
 
@@ -893,6 +991,27 @@ function renderModal(){
         <div class="sheet-actions">
           <button class="btn btn-secondary" onclick="confirmNo()">Cancel</button>
           <button class="btn btn-danger" style="border-color:var(--danger);" onclick="confirmYes()">Confirm</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  if(modalState.kind === 'pickKnockout'){
+    const sel = modalState.selected;
+    return `<div class="overlay" onclick="if(event.target===this)closeModal()">
+      <div class="sheet">
+        <h3>Pick 4 for the Knockout</h3>
+        <p class="hint" style="margin-top:-8px;text-align:center;">Choose exactly 4 players to seed the semi-finals. Pairings are drawn at random. ${sel.length} / 4 selected</p>
+        <div class="card" style="padding:4px 10px;max-height:280px;overflow-y:auto;">
+          ${state.players.map(p=>`
+            <label class="pick-row">
+              <input type="checkbox" ${sel.includes(p.id)?'checked':''} ${(!sel.includes(p.id) && sel.length>=4)?'disabled':''} onchange="toggleKnockoutPick('${p.id}')">
+              <span>${escapeHtml(p.name)}</span>
+            </label>`).join('')}
+        </div>
+        <div class="sheet-actions">
+          <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary" ${sel.length!==4?'disabled':''} onclick="confirmPickKnockout()">Start Knockout</button>
         </div>
       </div>
     </div>`;
