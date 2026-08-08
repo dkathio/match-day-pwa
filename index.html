@@ -333,18 +333,20 @@ function shuffle(arr){
 }
 
 /* ---------------- STORAGE ---------------- */
-function persist(){
+async function persist(){
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    if(window.storage) await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
   }catch(e){ console.warn('Save failed, continuing in-memory only', e); }
 }
 
-function loadState(){
+async function loadState(){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw){
-      const parsed = JSON.parse(raw);
-      if(parsed && Array.isArray(parsed.players)) state = Object.assign(defaultState(), parsed);
+    if(window.storage){
+      const res = await window.storage.get(STORAGE_KEY, false);
+      if(res && res.value){
+        const parsed = JSON.parse(res.value);
+        if(parsed && Array.isArray(parsed.players)) state = Object.assign(defaultState(), parsed);
+      }
     }
   }catch(e){ /* no saved data yet, or storage unavailable */ }
   render();
